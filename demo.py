@@ -57,7 +57,7 @@ def fact_in_chunk(fact: str, text: str) -> bool:
     return norm(fact) in norm(text)
 
 
-def show_chunks(chunks, method: str, n: int = 3):
+def show_chunks(chunks, n: int = 3):
     print(f"  {len(chunks)} chunks, avg {sum(len(c['text']) for c in chunks)//len(chunks)} chars")
     for c in chunks[:n]:
         print(f"    - {bold(c['title'])}   pages {c.get('pages')}")
@@ -65,12 +65,31 @@ def show_chunks(chunks, method: str, n: int = 3):
         print(f"    ... and {len(chunks) - n} more")
 
 
+def show_all_chunks(chunks):
+    """Print EVERY chunk so nobody has to imagine what was created."""
+    for i, c in enumerate(chunks, 1):
+        t = c["text"].replace("\n", " ")
+        print(f"  {i:>3}. {bold(c['title'])}   pages {c.get('pages')}  ({len(t)} chars)")
+        print(f"       {t[:140]}{'...' if len(t) > 140 else ''}")
+
+
+def fact_window(text: str, fact: str, width: int = 140) -> str:
+    """The fact shown IN CONTEXT inside its chunk, so the match is visible."""
+    text = " ".join(text.split())                    # collapse newlines for clean display
+    pos = norm(text).find(norm(fact))
+    start = max(0, pos - 30)
+    end = min(len(text), pos + width)
+    head = "..." if start > 0 else ""
+    return head + text[start:end] + "..."
+
+
 def window_around(chunks, needle: str, width: int = 160) -> str:
     """Return a short quote from whichever chunk contains the needle."""
     for c in chunks:
-        pos = norm(c["text"]).find(norm(needle))
+        text = " ".join(c["text"].split())
+        pos = norm(text).find(norm(needle))
         if pos >= 0:
-            return c["text"][max(0, pos - 10):pos + width]
+            return text[max(0, pos - 10):pos + width]
     return "(needle not found)"
 
 
@@ -79,7 +98,7 @@ def run_retrieval(method, chunks, model, index="chunks"):
 
     For structural (index="lines") each section is scored by its BEST-matching
     line -- the small-to-big trick -- and the top-2 sections are returned in rank
-    order. Every metric is computed from that rank order, so it stays honest.
+    order with their similarity scores, so the terminal shows how they ranked.
     """
     if index == "lines":
         units = [(i, ln) for i, c in enumerate(chunks) for ln in c.get("lines", [c["text"]]) if ln.strip()]
@@ -106,9 +125,9 @@ def run_retrieval(method, chunks, model, index="chunks"):
                 if len(ranked) == TOP_K:
                     break
 
-        retrieved = [chunks[i] for i in ranked]
-        found = [any(fact_in_chunk(f, c["text"]) for c in retrieved) for f in q["facts"]]
-        rel = [sum(1 for f in q["facts"] if fact_in_chunk(f, c["text"])) for c in retrieved]
+        found = [any(fact_in_chunk(f, c["text"]) for c in [chunks[i] for i in ranked])
+                 for f in q["facts"]]
+        rel = [sum(1 for f in q["facts"] if fact_in_chunk(f, chunks[i]["text"])) for i in ranked]
 
         # MRR@2: 1 / (rank of first chunk that holds at least one required fact)
         first = next((i for i, r in enumerate(rel) if r > 0), None)
@@ -122,7 +141,9 @@ def run_retrieval(method, chunks, model, index="chunks"):
 
         rows.append({
             "question": q["question"],
-            "retrieved": [c["title"] for c in retrieved],
+            "hits": [{"title": chunks[i]["title"], "pages": chunks[i].get("pages"),
+                      "sim": sec_sim[i] if index == "lines" else sims[i],
+                      "text": chunks[i]["text"]} for i in ranked],
             "facts": q["facts"],
             "found": found,
             "mrr": mrr,
@@ -157,15 +178,17 @@ def main():
     # ---------------- STEP 3: chunk structurally ------------------------
     step("3. Structural chunking = one chunk per heading (section + its tables)")
     structural = chunkers.split_structural(blocks)
-    print("  method:", bold("split_structural"))
-    show_chunks(structural, "structural")
+    print("  method: split_structural — every heading opens a chunk, everything "
+          "below it joins that chunk until the next heading.\n")
+    show_all_chunks(structural)
 
     # ---------------- STEP 4: chunk recursively -------------------------
     step("4. Recursive chunking = size-first, cut at the biggest natural boundary")
     doc_text = "\n".join(b["text"] for b in blocks)
     recursive = chunkers.split_recursive(doc_text)
-    print("  method:", bold("split_recursive"))
-    show_chunks(recursive, "recursive")
+    print("  method: split_recursive — a 600-char budget; cut at the largest "
+          "separator (blank line, newline, '.', space) that fits.\n")
+    show_all_chunks(recursive)
 
     # ---------------- STEP 5: the questions -----------------------------
     step("5. The exam: 6 questions, each needs 2 facts taken VERBATIM from the PDF")
@@ -202,8 +225,23 @@ def main():
         print(f"\n  {bold(method)}:")
         for i, r in enumerate(rows, 1):
             mark = PASS if all(r["found"]) else FAIL
-            print(f"    Q{i}. facts {sum(r['found'])}/{len(r['facts'])} [{mark}]  "
-                  f"retrieved: {', '.join(r['retrieved'])}")
+            print(f"\n    Q{i}. {r['question']}")
+            print(f"        verdict: {mark}  (needs both required facts)\n")
+            rank = 0
+            for h in r["hits"]:
+                rank += 1
+                print(f"      rank#{rank}  \"{bold(h['title'])}\"  pages {h['pages']}  "
+                      f"sim {h['sim']:.3f}  ({len(h['text'])} chars)")
+                matched = False
+                for j, f in enumerate(r["facts"], 1):
+                    if fact_in_chunk(f, h["text"]):
+                        print(f"        {green(f'fact #{j} found:')}")
+                        print(f"          \"{fact_window(h['text'], f)}\"")
+                        matched = True
+                if not matched:
+                    print(f"        {dim('no required fact in this chunk')}  (it ranked "
+                          f"high on wording, not on the facts)")
+    print()
 
     # ---------------- STEP 8: the numbers -------------------------------
     step("8. Final scoreboard (hits / P@2 / R@2 / MRR@2 / NDCG@2)")
@@ -232,7 +270,7 @@ def main():
             output.append(f"- Q{i}: {r['question']}")
             output.append(f"  facts found: {sum(r['found'])}/2 · hit: {all(r['found'])} · "
                           f"mrr@2: {r['mrr']:.3f} · ndcg@2: {r['ndcg']:.3f}")
-            output.append(f"  retrieved: {r['retrieved']}")
+            output.append(f"  retrieved: {[h['title'] for h in r['hits']]}")
     with open(OUTPUT, "w") as f:
         f.write("\n".join(output) + "\n")
     print(f"\n  full per-question transcript written to {bold(OUTPUT)}")
