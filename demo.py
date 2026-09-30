@@ -10,6 +10,7 @@ chunking wins on this document.
 """
 from __future__ import annotations
 
+import math
 import sys
 
 from sentence_transformers import SentenceTransformer
@@ -74,7 +75,12 @@ def window_around(chunks, needle: str, width: int = 160) -> str:
 
 
 def run_retrieval(method, chunks, model, index="chunks"):
-    """Same retrieval as a production system: embed, take top-2, check the facts."""
+    """Same retrieval as a production system: embed, rank, take top-2, check the facts.
+
+    For structural (index="lines") each section is scored by its BEST-matching
+    line -- the small-to-big trick -- and the top-2 sections are returned in rank
+    order. Every metric is computed from that rank order, so it stays honest.
+    """
     if index == "lines":
         units = [(i, ln) for i, c in enumerate(chunks) for ln in c.get("lines", [c["text"]]) if ln.strip()]
     else:
@@ -85,15 +91,42 @@ def run_retrieval(method, chunks, model, index="chunks"):
     for q in QUESTIONS:
         qv = model.encode(q["question"], normalize_embeddings=True).reshape(1, -1)
         sims = (vec @ qv.T).ravel()
-        top = sims.argsort()[::-1][:TOP_K]
-        distinct = sorted({units[i][0] for i in top})
-        retrieved = [chunks[i] for i in distinct]
+        order = sims.argsort()[::-1]
+
+        if index == "lines":                       # score each section by its best line
+            sec_sim = {}
+            for pos in order:
+                sec_sim.setdefault(units[pos][0], sims[pos])
+            ranked = sorted(sec_sim, key=sec_sim.get, reverse=True)[:TOP_K]
+        else:                                      # chunks are ranked as they are
+            ranked = []
+            for pos in order:
+                if units[pos][0] not in ranked:
+                    ranked.append(units[pos][0])
+                if len(ranked) == TOP_K:
+                    break
+
+        retrieved = [chunks[i] for i in ranked]
         found = [any(fact_in_chunk(f, c["text"]) for c in retrieved) for f in q["facts"]]
+        rel = [sum(1 for f in q["facts"] if fact_in_chunk(f, c["text"])) for c in retrieved]
+
+        # MRR@2: 1 / (rank of first chunk that holds at least one required fact)
+        first = next((i for i, r in enumerate(rel) if r > 0), None)
+        mrr = 1.0 / (first + 1) if first is not None else 0.0
+
+        # NDCG@2: facts in a chunk = graded relevance; rank-order quality vs ideal order
+        dcg = sum(rel[i] / math.log2(i + 2) for i in range(len(rel)))
+        ideal = sorted(rel, reverse=True)
+        idcg = sum(ideal[i] / math.log2(i + 2) for i in range(len(ideal)))
+        ndcg = dcg / idcg if idcg else 0.0
+
         rows.append({
             "question": q["question"],
             "retrieved": [c["title"] for c in retrieved],
             "facts": q["facts"],
             "found": found,
+            "mrr": mrr,
+            "ndcg": ndcg,
         })
     return rows
 
@@ -173,27 +206,32 @@ def main():
                   f"retrieved: {', '.join(r['retrieved'])}")
 
     # ---------------- STEP 8: the numbers -------------------------------
-    step("8. Final scoreboard (hits / P@2 / R@2)")
+    step("8. Final scoreboard (hits / P@2 / R@2 / MRR@2 / NDCG@2)")
     output = ["# Structural vs Recursive — on a real multi-page PDF",
               f"\nmethods: {list(rows_by)} | top-{TOP_K} | questions: {len(QUESTIONS)}",
-              "\n| method | chunks | avg chunk chars | hits | P@2 | R@2 |",
-              "|---|---|---|---|---|---|"]
+              "\n| method | chunks | avg chunk chars | hits | P@2 | R@2 | MRR@2 | NDCG@2 |",
+              "|---|---|---|---|---|---|---|---|"]
     for method, chunks, index in (("structural", structural, "lines"), ("recursive", recursive, "chunks")):
         rows = rows_by[method]
         hits = sum(all(r["found"]) for r in rows)
-        p = sum(sum(r["found"]) for r in rows) / (TOP_K * len(rows))
-        r_ = sum(sum(r["found"]) for r in rows) / (2 * len(rows))
+        facts = sum(sum(r["found"]) for r in rows)
+        p = facts / (TOP_K * len(rows))
+        r_ = facts / (2 * len(rows))
+        mrr = sum(r["mrr"] for r in rows) / len(rows)
+        ndcg = sum(r["ndcg"] for r in rows) / len(rows)
         avg = sum(len(c["text"]) for c in chunks) // len(chunks)
         n = f"{hits}/{len(rows)}"
         print(f"  {bold(method):<11} {len(chunks):>5} chunks  {avg:>4} chars  "
-              f"hits {green(n) if hits == len(rows) else n:<4} P@2 {p:.2f}  R@2 {r_:.2f}")
-        output.append(f"| {method} | {len(chunks)} | {avg} | {n} | {p:.3f} | {r_:.3f} |")
+              f"hits {green(n) if hits == len(rows) else n:<4} P@2 {p:.2f}  R@2 {r_:.2f}  "
+              f"MRR@2 {mrr:.3f}  NDCG@2 {ndcg:.3f}")
+        output.append(f"| {method} | {len(chunks)} | {avg} | {n} | {p:.3f} | {r_:.3f} | {mrr:.3f} | {ndcg:.3f} |")
     output.append("\nper-question detail:")
     for method, rows in rows_by.items():
         output.append(f"\n## {method}")
         for i, r in enumerate(rows, 1):
             output.append(f"- Q{i}: {r['question']}")
-            output.append(f"  facts found: {sum(r['found'])}/2 · hit: {all(r['found'])}")
+            output.append(f"  facts found: {sum(r['found'])}/2 · hit: {all(r['found'])} · "
+                          f"mrr@2: {r['mrr']:.3f} · ndcg@2: {r['ndcg']:.3f}")
             output.append(f"  retrieved: {r['retrieved']}")
     with open(OUTPUT, "w") as f:
         f.write("\n".join(output) + "\n")

@@ -26,8 +26,15 @@ substring match — deterministic, no judgement involved.
 
 For each method we:
 1. embed every chunk once (CPU-only, `all-MiniLM-L6-v2`);
-2. retrieve the most relevant sections for each question;
-3. report `hits` (both facts found), `P@2` and `R@2`.
+2. retrieve the most relevant sections for each question (top-2, in rank order);
+3. report **hits** (both facts found), **P@2**, **R@2**, **MRR@2** and **NDCG@2**.
+
+`P@2`/`R@2` measure *how much* of the required material reaches the retrieved
+context; `MRR@2` measures *how early* the first fact-carrying chunk appears (0–1,
+1 = always first); `NDCG@2` grades ranking quality with fact counts as relevance
+(so a chunk holding both facts beats a chunk holding one). MRR + NDCG penalize
+exactly the recursive failure: the right facts exist, but they are scattered and
+partly ranked too low to be reached.
 
 One honest technical note: structural sections can be long, and a whole section
 is too big to vector-match directly (it gets diluted/truncated). So structural
@@ -38,10 +45,10 @@ sections to offer, so its unit is its own chunk.
 
 ## Result
 
-| method      | chunks | avg chunk chars | hits | P@2 | R@2 |
-|-------------|--------|-----------------|------|-----|-----|
-| structural  | 93     | 813             | 6/6  | 1.0 | 1.0 |
-| recursive   | 137    | 551             | 1/6  | 0.33| 0.33|
+| method      | chunks | avg chunk chars | hits | P@2 | R@2 | MRR@2 | NDCG@2 |
+|-------------|--------|-----------------|------|-----|-----|-------|--------|
+| structural  | 93     | 813             | 6/6  | 1.0 | 1.0 | 1.000 | 1.000  |
+| recursive   | 137    | 551             | 1/6  | 0.33| 0.33| 0.417 | 0.438  |
 
 `evidence.md` records the per-question detail, so the numbers can be checked
 and re-run.
@@ -84,7 +91,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 6. **The crux, one concrete case** — the Safe-mode row in Table 7 spans two PDF
    pages: structural keeps both facts in one chunk, recursive cuts the row in two.
 7. **Run retrieval** for both methods (top-2) and watch the per-question PASS/FAIL.
-8. **The scoreboard** (hits / P@2 / R@2) and a full transcript in `evidence.md`.
+8. **The scoreboard** (hits / P@2 / R@2 / MRR@2 / NDCG@2) and a full transcript in `evidence.md`.
 
 ## Caveats (kept honest)
 
