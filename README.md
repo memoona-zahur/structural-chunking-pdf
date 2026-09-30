@@ -63,15 +63,28 @@ and re-run.
 | `extract_pdf.py` | reads the PDF into text lines, keeping page + font size (headings are bigger than body text) |
 | `chunkers.py` | the two strategies: `split_structural` (font-size headings) and `split_recursive` |
 | `questions.py` | the 6 questions + their verbatim required facts |
-| `main.py` | runs the comparison and writes `evidence.md` |
-| `evidence.md` | last run's full output |
+| `demo.py` | the step-by-step walkthrough (numbers are computed on every run, nothing hand-written) |
+| `evidence.md` | last run's full per-question transcript |
 
-## Run it
+## Run it (step by step, not one black box)
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python main.py
+.venv/bin/python demo.py            # full walkthrough
+.venv/bin/python demo.py --pause    # same, but waits for Enter between steps (live demo)
 ```
+
+`demo.py` is a narrated tour, not a hidden pipeline. You watch it happen:
+
+1. **Read the PDF** into text lines, keeping page + font size.
+2. **Find the headings** — the lines whose font is ~2pt bigger than body text.
+3. **Chunk structurally** — one chunk per heading (section + its tables together).
+4. **Chunk recursively** — size-first, cut at the biggest natural boundary.
+5. **Show the exam** — 6 questions, each with 2 facts taken verbatim from the PDF.
+6. **The crux, one concrete case** — the Safe-mode row in Table 7 spans two PDF
+   pages: structural keeps both facts in one chunk, recursive cuts the row in two.
+7. **Run retrieval** for both methods (top-2) and watch the per-question PASS/FAIL.
+8. **The scoreboard** (hits / P@2 / R@2) and a full transcript in `evidence.md`.
 
 ## Caveats (kept honest)
 
